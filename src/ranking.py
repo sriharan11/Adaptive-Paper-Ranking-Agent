@@ -37,10 +37,28 @@ def choose_concept_to_remove(
     return min(candidates, key=lambda concept: len(" ".join(concept)))
 
 
+def calculate_concept_similarity(question_concepts, paper_concepts) -> float:
+    if not question_concepts or not paper_concepts:
+        return 0.0
+
+    best_match_scores = []
+    for question_concept in question_concepts:
+        pair_scores = [
+            question_concept.similarity(paper_concept)
+            for paper_concept in paper_concepts
+            if question_concept.has_vector and paper_concept.has_vector
+        ]
+        best_match = max(pair_scores, default=0.0)
+        best_match_scores.append(best_match)
+
+    return sum(best_match_scores) / len(best_match_scores)
+
+
 nlp = spacy.load("en_core_web_md")
 question = input("Enter your research question: ").strip()
 question_doc = nlp(question)
 question_concepts = extract_concepts(question_doc)
+question_concept_docs = [nlp(" ".join(concept)) for concept in question_concepts]
 search_query = build_search_query(question_concepts)
 print("Search query:", search_query)
 
@@ -60,15 +78,13 @@ for paper in papers:
     paper_text = paper.paper_title + " " + paper.abstract
     paper_doc = nlp(paper_text)
     similarity = question_doc.similarity(paper_doc)
-    paper_concepts = set(extract_concepts(paper_doc))
-    matched_concepts = sum(
-        concept in paper_concepts for concept in question_concepts
-    )
-    concept_coverage = (
-        matched_concepts / len(question_concepts) if question_concepts else 0.0
+    paper_concepts = extract_concepts(paper_doc)
+    paper_concept_docs = [nlp(" ".join(concept)) for concept in paper_concepts]
+    concept_similarity_score = calculate_concept_similarity(
+        question_concept_docs, paper_concept_docs
     )
 
     print(paper.paper_title)
     print("Semantic similarity:", similarity)
-    print("Concept coverage:", concept_coverage)
+    print("Concept similarity:", concept_similarity_score)
     print()
