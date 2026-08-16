@@ -2,6 +2,9 @@ import spacy
 from retrieval import retrieve_papers
 
 
+GENERIC_TERMS = {"technique", "method", "approach", "strategy", "way"}
+
+
 def extract_concepts(doc) -> list[tuple[str, ...]]:
     concepts = []
 
@@ -17,17 +20,42 @@ def extract_concepts(doc) -> list[tuple[str, ...]]:
     return concepts
 
 
+def build_search_query(concepts: list[tuple[str, ...]]) -> str:
+    concept_phrases = [" ".join(concept) for concept in concepts]
+    return " AND ".join(f'all:"{phrase}"' for phrase in concept_phrases)
+
+
+def choose_concept_to_remove(
+    concepts: list[tuple[str, ...]],
+) -> tuple[str, ...]:
+    generic_concepts = [
+        concept
+        for concept in concepts
+        if any(term in concept for term in GENERIC_TERMS)
+    ]
+    candidates = generic_concepts or concepts
+    return min(candidates, key=lambda concept: len(" ".join(concept)))
+
+
 nlp = spacy.load("en_core_web_md")
 question = input("Enter your research question: ").strip()
 question_doc = nlp(question)
 question_concepts = extract_concepts(question_doc)
-concept_phrases = [" ".join(concept) for concept in question_concepts]
-search_query = " AND ".join(
-    f'all:"{phrase}"' for phrase in concept_phrases
-)
+search_query = build_search_query(question_concepts)
 print("Search query:", search_query)
 
 papers = retrieve_papers(search_query)
+if len(papers) < 10:
+    print("Search was TOO NARROW.")
+    removed_concept = choose_concept_to_remove(question_concepts)
+    broader_concepts = question_concepts.copy()
+    broader_concepts.remove(removed_concept)
+    broader_query = build_search_query(broader_concepts)
+
+    print("Removed concept:", " ".join(removed_concept))
+    print("Broader query:", broader_query)
+    papers = retrieve_papers(broader_query)
+
 for paper in papers:
     paper_text = paper.paper_title + " " + paper.abstract
     paper_doc = nlp(paper_text)
