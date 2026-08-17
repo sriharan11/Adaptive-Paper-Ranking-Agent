@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -8,32 +10,84 @@ from paper import Paper
 
 
 MIN_REQUEST_INTERVAL = 3.0
-RETRY_DELAY = 5.0
+MAX_REQUEST_ATTEMPTS = 3
+RATE_LIMIT_RETRY_DELAY = 30.0
+SERVER_RETRY_DELAY = 10.0
+RETRYABLE_HTTP_CODES = {429, 502, 503, 504}
+REQUEST_TIME_FILE = Path(tempfile.gettempdir()) / "adaptive_paper_arxiv_request_time"
 _last_request_time: float | None = None
 
 
-def _fetch_arxiv(url: str) -> bytes:
+def _wait_for_request_slot() -> None:
     global _last_request_time
 
-    for attempt in range(2):
-        if _last_request_time is not None:
-            elapsed = time.monotonic() - _last_request_time
-            if elapsed < MIN_REQUEST_INTERVAL:
-                time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+    request_times = []
+    if _last_request_time is not None:
+        request_times.append(_last_request_time)
 
-        _last_request_time = time.monotonic()
+    try:
+        request_times.append(float(REQUEST_TIME_FILE.read_text(encoding="utf-8")))
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+
+    if request_times:
+        elapsed = max(0.0, time.time() - max(request_times))
+        if elapsed < MIN_REQUEST_INTERVAL:
+            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+
+    _last_request_time = time.time()
+    try:
+        REQUEST_TIME_FILE.write_text(str(_last_request_time), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _fetch_arxiv(url: str) -> bytes:
+    last_error = None
+
+    for attempt in range(MAX_REQUEST_ATTEMPTS):
+        _wait_for_request_slot()
 
         try:
             with libreq.urlopen(url) as response:
                 return response.read()
         except urllib.error.HTTPError as error:
-            if error.code != 429 or attempt == 1:
+            if error.code not in RETRYABLE_HTTP_CODES:
                 raise
 
-            print("arXiv rate limit reached; waiting 5 seconds before retrying once.")
-            time.sleep(RETRY_DELAY)
+            last_error = error
+            if attempt == MAX_REQUEST_ATTEMPTS - 1:
+                break
 
-    raise RuntimeError("arXiv request failed")
+            retry_delay = (
+                RATE_LIMIT_RETRY_DELAY
+                if error.code == 429
+                else SERVER_RETRY_DELAY
+            )
+            if error.code == 429 and error.headers:
+                try:
+                    retry_delay = max(
+                        retry_delay,
+                        float(
+                            error.headers.get(
+                                "Retry-After", RATE_LIMIT_RETRY_DELAY
+                            )
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+            print(
+                f"arXiv temporarily unavailable ({error.code}); "
+                f"retrying in {retry_delay:g} seconds..."
+            )
+            time.sleep(retry_delay)
+
+    raise RuntimeError(
+        "arXiv is temporarily unavailable after "
+        f"{MAX_REQUEST_ATTEMPTS} attempts "
+        f"(last HTTP status: {last_error.code})."
+    ) from last_error
 
 
 def retrieve_papers(search_query: str) -> list[Paper]:
