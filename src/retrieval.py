@@ -1,7 +1,39 @@
+import time
+import urllib.error
 import urllib.parse
 import urllib.request as libreq
+
 import feedparser
 from paper import Paper
+
+
+MIN_REQUEST_INTERVAL = 3.0
+RETRY_DELAY = 5.0
+_last_request_time: float | None = None
+
+
+def _fetch_arxiv(url: str) -> bytes:
+    global _last_request_time
+
+    for attempt in range(2):
+        if _last_request_time is not None:
+            elapsed = time.monotonic() - _last_request_time
+            if elapsed < MIN_REQUEST_INTERVAL:
+                time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+
+        _last_request_time = time.monotonic()
+
+        try:
+            with libreq.urlopen(url) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code != 429 or attempt == 1:
+                raise
+
+            print("arXiv rate limit reached; waiting 5 seconds before retrying once.")
+            time.sleep(RETRY_DELAY)
+
+    raise RuntimeError("arXiv request failed")
 
 
 def retrieve_papers(search_query: str) -> list[Paper]:
@@ -11,8 +43,8 @@ def retrieve_papers(search_query: str) -> list[Paper]:
         "max_results": 10,
     })
 
-    with libreq.urlopen(f"https://export.arxiv.org/api/query?{params}") as response:
-        result = response.read()
+    url = f"https://export.arxiv.org/api/query?{params}"
+    result = _fetch_arxiv(url)
 
     feed = feedparser.parse(result)
     papers: list[Paper] = []
