@@ -1,5 +1,6 @@
 import spacy
 from retrieval import retrieve_papers
+from transformers import pipeline
 
 
 GENERIC_TERMS = {"technique", "method", "approach", "strategy", "way"}
@@ -54,6 +55,34 @@ def calculate_concept_similarity(question_concepts, paper_concepts) -> float:
     return sum(best_match_scores) / len(best_match_scores)
 
 
+def build_hypothesis(question: str) -> str:
+    cleaned_question = question.strip().removesuffix("?").strip()
+    lowercase_question = cleaned_question.lower()
+
+    concept_starts = {
+        "what techniques": "techniques",
+        "what methods": "methods",
+        "what approaches": "approaches",
+    }
+    for question_start, concept_name in concept_starts.items():
+        if lowercase_question.startswith(question_start):
+            remainder = cleaned_question[len(question_start):].strip()
+            return (
+                f"This paper presents or evaluates {concept_name} "
+                f"that {remainder}."
+            )
+
+    for question_start in ("how does", "how do"):
+        if lowercase_question.startswith(question_start):
+            remainder = cleaned_question[len(question_start):].strip()
+            return f"This paper investigates {remainder}."
+
+    return (
+        "This paper directly addresses the research question: "
+        f"{cleaned_question}"
+    )
+
+
 nlp = spacy.load("en_core_web_md")
 question = input("Enter your research question: ").strip()
 question_doc = nlp(question)
@@ -74,6 +103,7 @@ if len(papers) < 10:
     print("Broader query:", broader_query)
     papers = retrieve_papers(broader_query)
 
+scored_papers = []
 for paper in papers:
     paper_text = paper.paper_title + " " + paper.abstract
     paper_doc = nlp(paper_text)
@@ -84,7 +114,57 @@ for paper in papers:
         question_concept_docs, paper_concept_docs
     )
 
-    print(paper.paper_title)
-    print("Semantic similarity:", similarity)
-    print("Concept similarity:", concept_similarity_score)
+    scored_papers.append(
+        {
+            "title": paper.paper_title,
+            "abstract": paper.abstract,
+            "semantic_similarity": similarity,
+            "concept_similarity": concept_similarity_score,
+        }
+    )
+
+top_papers = sorted(
+    scored_papers,
+    key=lambda paper: paper["concept_similarity"],
+    reverse=True,
+)[:5]
+
+for rank, paper in enumerate(top_papers, start=1):
+    print("Rank:", rank)
+    print("Title:", paper["title"])
+    print("Semantic similarity:", paper["semantic_similarity"])
+    print("Concept similarity:", paper["concept_similarity"])
+    print("Abstract:", paper["abstract"])
     print()
+
+experiment_titles = [
+    "Optimizing Medical Question-Answering Systems",
+    "MedHallu",
+]
+experiment_hypothesis = build_hypothesis(question)
+print("Generated hypothesis:", experiment_hypothesis)
+experiment_papers = [
+    paper
+    for title in experiment_titles
+    for paper in papers
+    if title.lower() in paper.paper_title.lower()
+]
+
+if experiment_papers:
+    zero_shot_classifier = pipeline(
+        "zero-shot-classification",
+        model="typeform/distilbert-base-uncased-mnli",
+    )
+
+    for paper in experiment_papers:
+        classification = zero_shot_classifier(
+            paper.abstract,
+            candidate_labels=[experiment_hypothesis],
+            hypothesis_template="{}",
+            multi_label=True,
+        )
+        entailment_score = classification["scores"][0]
+
+        print("Paper:", paper.paper_title)
+        print("Hypothesis tested:", experiment_hypothesis)
+        print("Entailment/relevance score:", entailment_score)
